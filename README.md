@@ -185,6 +185,71 @@ This blueprint exposes standard endpoints for orchestrators:
 
 ---
 
+---
+
+## 🧪 Interactive Testing with `php artisan tinker`
+
+You can test the queue pressure algorithms, autoscaling calculations, metric drivers, and database configurations using `php artisan tinker`:
+
+### Step 1: Inspect Queue Pressure on an Idle System
+```bash
+php artisan tinker --execute '$monitor = app(App\Services\Scaling\QueuePressureMonitor::class); dump($monitor->evaluateQueuePressure("default"));'
+```
+```php
+[
+  "queue" => "default",
+  "size" => 0,
+  "wait_time_seconds" => 0.0,
+  "pressure_score" => 0.0,
+  "status" => "HEALTHY"
+]
+```
+
+### Step 2: Simulate Delayed Backlog & Evaluate Autoscaling Plan
+Simulates 50 delayed jobs (180s latency) and calculates worker scaling recommendation:
+```bash
+php artisan tinker --execute 'for ($i = 0; $i < 50; $i++) { DB::table("jobs")->insert(["queue" => "webhooks", "payload" => "{}", "attempts" => 0, "available_at" => now()->subMinutes(3)->getTimestamp(), "created_at" => now()->subMinutes(3)->getTimestamp()]); }; $monitor = app(App\Services\Scaling\QueuePressureMonitor::class); dump($monitor->computeAutoscalingPlan(currentWorkers: 2, queue: "webhooks")); DB::table("jobs")->truncate();'
+```
+```php
+[
+  "current_workers" => 2,
+  "desired_workers" => 3,
+  "scaling_action" => "SCALE_UP",
+  "reason" => "Queue pressure score 815.7 exceeds threshold 100.0 (Wait time: 180.0s, Backlog: 50 jobs)",
+  "pressure_metrics" => [
+    "queue" => "webhooks",
+    "size" => 50,
+    "wait_time_seconds" => 180.0,
+    "pressure_score" => 815.7,
+    "status" => "CRITICAL_CONGESTION"
+  ]
+]
+```
+
+### Step 3: Test Prometheus Metric Driver Exposition
+Verify standard OpenMetrics exposition generation:
+```bash
+php artisan tinker --execute '$prom = new App\Services\Scaling\Drivers\PrometheusMetricDispatcher; $prom->dispatch("wait_time_seconds", 42.5, ["queue" => "high"]); $prom->dispatch("queue_pressure", 165.2, ["queue" => "high"]); echo $prom->renderExposition();'
+```
+```text
+# HELP laravel_queue_metrics High-throughput queue pressure and wait-time telemetry
+# TYPE laravel_queue_metrics gauge
+laravel_queue_wait_time_seconds{queue="high"} 42.5 1789082869000
+laravel_queue_queue_pressure{queue="high"} 165.2 1789082869000
+```
+
+### Step 4: Test CloudWatch High-Resolution Telemetry Payload
+```bash
+php artisan tinker --execute '$cw = new App\Services\Scaling\Drivers\CloudWatchMetricDispatcher; $cw->dispatch("wait_time_seconds", 14.8, ["queue" => "default"]); dump($cw->flushPayload());'
+```
+
+### Step 5: Verify High-Throughput Read/Write Replicas & Sticky Routing
+```bash
+php artisan tinker --execute 'dump(config("database.connections.mysql.read"), config("database.connections.mysql.write"), config("database.connections.mysql.sticky"));'
+```
+
+---
+
 ## 🧪 Automated Test Suite
 
 Run the full Pest v3 test suite covering migrations, wait-time calculations, autoscaling recommendations, and telemetry drivers:
@@ -197,4 +262,6 @@ php artisan test --compact
 
 ## 📚 Further Reading
 
-Read [`SCALING_PLAYBOOK.md`](SCALING_PLAYBOOK.md) for the complete production scaling playbook covering MySQL connection limits, Redis socket tuning, KEDA manifest configurations, and lock-free concurrency patterns.
+* [`SCALING_PLAYBOOK.md`](SCALING_PLAYBOOK.md): Complete production scaling playbook covering MySQL connection limits, Redis socket tuning, KEDA manifest configurations, and lock-free concurrency patterns.
+* [`PYTHON_SCALING_GUIDE.md`](PYTHON_SCALING_GUIDE.md): Architectural guide showing how these exact high-throughput patterns (Queue Pressure, DB connection pooling, KEDA autoscaling) are implemented in Python with **FastAPI**, **Celery**, **RQ**, and **SQLAlchemy**.
+
